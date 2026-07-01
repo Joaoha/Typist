@@ -1,6 +1,6 @@
 [package]
 name = "typist"
-version = "0.8.3"
+version = "1.0.0"
 description = "Typist"
 authors = ["joao"]
 edition = "2021"
