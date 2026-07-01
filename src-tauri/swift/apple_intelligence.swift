@@ -86,7 +86,7 @@ public func processTextWithSystemPrompt(
     }
     let box = ResultBox()
 
-    Task.detached(priority: .userInitiated) {
+    let task = Task.detached(priority: .userInitiated) {
         defer { semaphore.signal() }
         do {
             let session = LanguageModelSession(
@@ -115,7 +115,24 @@ public func processTextWithSystemPrompt(
         }
     }
 
-    semaphore.wait()
+    // Bounded wait: the on-device model can occasionally stall inside
+    // `respond(...)` without returning or throwing, which would otherwise block
+    // the calling thread forever (the post-processing "hang"). If it doesn't
+    // finish in time, cancel and report a timeout so the caller falls back to
+    // the raw transcript.
+    //
+    // Scale the budget with input size: a short transcript should finish in a
+    // few seconds (so we recover quickly from a stall), while a near
+    // context-limit transcript can legitimately take much longer to generate.
+    let timeoutSeconds = min(120.0, 15.0 + Double(swiftUserContent.count) / 200.0)
+    let waitResult = semaphore.wait(timeout: .now() + timeoutSeconds)
+    if waitResult == .timedOut {
+        task.cancel()
+        responsePtr.pointee.error_message = duplicateCString(
+            "Apple Intelligence timed out — the on-device model did not respond."
+        )
+        return responsePtr
+    }
 
     // Write to responsePtr on the calling thread after task completes
     if let response = box.response {
