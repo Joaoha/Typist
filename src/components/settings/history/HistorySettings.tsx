@@ -1,7 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { Check, Copy, FolderOpen, RotateCcw, Star, Trash2 } from "lucide-react";
+import {
+  ArrowRight,
+  BookPlus,
+  Check,
+  Copy,
+  FolderOpen,
+  RotateCcw,
+  Star,
+  Trash2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -9,11 +18,14 @@ import {
   events,
   type HistoryEntry,
   type HistoryUpdatePayload,
+  type PhraseCorrection,
 } from "@/bindings";
 import { useOsType } from "@/hooks/useOsType";
+import { useSettings } from "@/hooks/useSettings";
 import { formatDateTime } from "@/utils/dateFormat";
 import { AudioPlayer } from "../../ui/AudioPlayer";
 import { Button } from "../../ui/Button";
+import { Input } from "../../ui/Input";
 
 const IconButton: React.FC<{
   onClick: () => void;
@@ -310,10 +322,69 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
   retryTranscription,
 }) => {
   const { t, i18n } = useTranslation();
+  const { getSetting, updateSetting } = useSettings();
   const [showCopied, setShowCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [showAdder, setShowAdder] = useState(false);
+  const [fromText, setFromText] = useState("");
+  const [toText, setToText] = useState("");
 
   const hasTranscription = entry.transcription_text.trim().length > 0;
+  // The cleaned (post-processed) text is what got pasted; show it alongside the
+  // original so the original mistranscription stays visible and teachable.
+  const cleaned = entry.post_processed_text?.trim() ?? "";
+  const hasCleaned = cleaned.length > 0 && cleaned !== entry.transcription_text.trim();
+
+  // Distinct word tokens from the original transcription, for quick "tap to grab".
+  const tokens = Array.from(
+    new Set(
+      entry.transcription_text
+        .split(/\s+/)
+        .map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
+        .filter((w) => w.length > 0),
+    ),
+  );
+
+  const customWords = (getSetting("custom_words") || []) as string[];
+  const corrections = (getSetting("transcription_corrections") ||
+    []) as PhraseCorrection[];
+
+  // Tapping a token (from the original) builds the "Heard" phrase.
+  const appendHeard = (tok: string) => {
+    setFromText((prev) => (prev.trim() ? `${prev.trim()} ${tok}` : tok));
+  };
+
+  // Add the corrected word to the fuzzy Custom Words list.
+  const addWord = () => {
+    const word = toText.trim().replace(/[<>"'&]/g, "");
+    if (!word || word.includes(" ") || word.length > 50) return;
+    if (customWords.some((w) => w.toLowerCase() === word.toLowerCase())) {
+      toast.error(t("settings.history.dictionary.duplicate", { word }));
+      return;
+    }
+    updateSetting("custom_words", [...customWords, word]);
+    toast.success(t("settings.history.dictionary.added", { word }));
+  };
+
+  // Save an exact (heard -> meant) correction, reusing the mistranscription as
+  // the "from" — same store the "record a correction" flow writes to.
+  const saveCorrection = () => {
+    const from = fromText.trim();
+    const to = toText.trim();
+    if (!from || !to) return;
+    if (corrections.some((c) => c.from.toLowerCase() === from.toLowerCase())) {
+      toast.error(
+        t("settings.history.dictionary.correctionDuplicate", { from }),
+      );
+      return;
+    }
+    updateSetting("transcription_corrections", [...corrections, { from, to }]);
+    toast.success(
+      t("settings.history.dictionary.correctionAdded", { from, to }),
+    );
+    setFromText("");
+    setToText("");
+  };
 
   const handleLoadAudio = useCallback(
     () => getAudioUrl(entry.file_name),
@@ -370,6 +441,14 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
             )}
           </IconButton>
           <IconButton
+            onClick={() => setShowAdder((v) => !v)}
+            disabled={!hasTranscription || retrying}
+            active={showAdder}
+            title={t("settings.history.dictionary.title")}
+          >
+            <BookPlus width={16} height={16} />
+          </IconButton>
+          <IconButton
             onClick={onToggleSaved}
             disabled={retrying}
             active={entry.saved}
@@ -410,6 +489,11 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
         </div>
       </div>
 
+      {hasCleaned && !retrying && (
+        <span className="-mb-2 text-[10px] font-semibold uppercase tracking-wide text-mid-gray">
+          {t("settings.history.originalLabel")}
+        </span>
+      )}
       <p
         className={`italic text-sm pb-2 ${
           retrying
@@ -438,6 +522,83 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
             ? entry.transcription_text
             : t("settings.history.transcriptionFailed")}
       </p>
+
+      {hasCleaned && !retrying && (
+        <div className="-mt-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-mid-gray">
+            {t("settings.history.cleanedLabel")}
+          </span>
+          <p className="text-sm text-text/90 select-text whitespace-pre-wrap break-words">
+            {cleaned}
+          </p>
+        </div>
+      )}
+
+      {showAdder && hasTranscription && (
+        <div className="flex flex-col gap-3 rounded-lg border border-mid-gray/20 p-3">
+          <p className="text-xs text-mid-gray">
+            {t("settings.history.dictionary.hint")}
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {tokens.map((tok) => (
+              <button
+                key={tok}
+                onClick={() => appendHeard(tok)}
+                className="px-1.5 py-0.5 rounded bg-mid-gray/15 hover:bg-logo-primary/30 text-xs font-mono cursor-pointer transition-colors"
+              >
+                {tok}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Input
+              type="text"
+              value={fromText}
+              onChange={(e) => setFromText(e.target.value)}
+              placeholder={t("settings.history.dictionary.heardPlaceholder")}
+              variant="compact"
+              className="max-w-40"
+            />
+            <ArrowRight className="w-4 h-4 shrink-0 text-mid-gray" />
+            <Input
+              type="text"
+              value={toText}
+              onChange={(e) => setToText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  if (fromText.trim() && toText.trim()) saveCorrection();
+                }
+              }}
+              placeholder={t("settings.history.dictionary.correctPlaceholder")}
+              variant="compact"
+              className="max-w-40"
+            />
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button
+              onClick={saveCorrection}
+              disabled={!fromText.trim() || !toText.trim()}
+              variant="primary"
+              size="md"
+            >
+              {t("settings.history.dictionary.saveCorrection")}
+            </Button>
+            <Button
+              onClick={addWord}
+              disabled={
+                !toText.trim() ||
+                toText.includes(" ") ||
+                toText.trim().length > 50
+              }
+              variant="secondary"
+              size="md"
+            >
+              {t("settings.history.dictionary.addWord")}
+            </Button>
+          </div>
+        </div>
+      )}
 
       <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />
     </div>

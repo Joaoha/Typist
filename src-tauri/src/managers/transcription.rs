@@ -1,4 +1,4 @@
-use crate::audio_toolkit::{apply_custom_words, filter_transcription_output};
+use crate::audio_toolkit::{apply_custom_words, apply_phrase_corrections, filter_transcription_output};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::model::{EngineType, ModelManager};
 use crate::settings::{
@@ -472,9 +472,9 @@ impl TranscriptionManager {
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
         #[cfg(debug_assertions)]
-        if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
+        if std::env::var("TYPIST_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
             return Err(anyhow::anyhow!(
-                "Simulated transcription failure (HANDY_FORCE_TRANSCRIPTION_FAILURE)"
+                "Simulated transcription failure (TYPIST_FORCE_TRANSCRIPTION_FAILURE)"
             ));
         }
 
@@ -730,14 +730,29 @@ impl TranscriptionManager {
             .map(|info| matches!(info.engine_type, EngineType::Whisper))
             .unwrap_or(false);
 
+        // Apply user-taught exact corrections first. These come from the
+        // "record a correction" flow and run for every engine (including
+        // Whisper), since they are precise find/replace fixes rather than the
+        // fuzzy, initial-prompt-based custom_words matching.
+        let result_text = if settings.transcription_corrections.is_empty() {
+            result.text
+        } else {
+            let pairs: Vec<(String, String)> = settings
+                .transcription_corrections
+                .iter()
+                .map(|c| (c.from.clone(), c.to.clone()))
+                .collect();
+            apply_phrase_corrections(&result.text, &pairs)
+        };
+
         let corrected_result = if !settings.custom_words.is_empty() && !is_whisper {
             apply_custom_words(
-                &result.text,
+                &result_text,
                 &settings.custom_words,
                 settings.word_correction_threshold,
             )
         } else {
-            result.text
+            result_text
         };
 
         // Filter out filler words and hallucinations

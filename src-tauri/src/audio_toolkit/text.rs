@@ -18,6 +18,47 @@ fn build_ngram(words: &[&str]) -> String {
         .concat()
 }
 
+/// Apply user-taught exact transcription corrections.
+///
+/// Each `(from, to)` pair replaces case-insensitive, word-bounded occurrences of
+/// `from` with `to`. Captured via the "record a correction" flow, where `from`
+/// is exactly what the recognizer produced, this is more precise than the fuzzy
+/// `custom_words` pass and runs before it.
+///
+/// Longer `from` phrases are applied first so multi-word corrections take
+/// precedence over shorter overlapping ones. The replacement text is inserted
+/// literally (no `$`-group expansion).
+pub fn apply_phrase_corrections(text: &str, corrections: &[(String, String)]) -> String {
+    let mut ordered: Vec<(&str, &str)> = corrections
+        .iter()
+        .map(|(from, to)| (from.trim(), to.trim()))
+        .filter(|(from, _)| !from.is_empty())
+        .collect();
+    if ordered.is_empty() {
+        return text.to_string();
+    }
+    // Descending by phrase length so multi-word phrases win over their parts.
+    ordered.sort_by_key(|(from, _)| std::cmp::Reverse(from.chars().count()));
+
+    let mut result = text.to_string();
+    for (from, to) in ordered {
+        // Use word boundaries only where the phrase edge is alphanumeric;
+        // otherwise `\b` would never match (e.g. a phrase ending in punctuation).
+        let starts_word = from.chars().next().is_some_and(|c| c.is_alphanumeric());
+        let ends_word = from.chars().last().is_some_and(|c| c.is_alphanumeric());
+        let pattern = format!(
+            "(?i){}{}{}",
+            if starts_word { r"\b" } else { "" },
+            regex::escape(from),
+            if ends_word { r"\b" } else { "" },
+        );
+        if let Ok(re) = Regex::new(&pattern) {
+            result = re.replace_all(&result, regex::NoExpand(to)).into_owned();
+        }
+    }
+    result
+}
+
 /// Finds the best matching custom word for a candidate string
 ///
 /// Uses Levenshtein distance and Soundex phonetic matching to find
@@ -322,6 +363,55 @@ pub fn filter_transcription_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pc(from: &str, to: &str) -> (String, String) {
+        (from.to_string(), to.to_string())
+    }
+
+    #[test]
+    fn phrase_correction_replaces_case_insensitively() {
+        let corrections = vec![pc("cube an eddies", "Kubernetes")];
+        assert_eq!(
+            apply_phrase_corrections("I deployed Cube An Eddies today", &corrections),
+            "I deployed Kubernetes today"
+        );
+    }
+
+    #[test]
+    fn phrase_correction_respects_word_boundaries() {
+        let corrections = vec![pc("cat", "dog")];
+        // "category" must not become "dogegory".
+        assert_eq!(
+            apply_phrase_corrections("the category of cat", &corrections),
+            "the category of dog"
+        );
+    }
+
+    #[test]
+    fn phrase_correction_handles_multi_word_and_longest_first() {
+        let corrections = vec![pc("new york", "NYC"), pc("york", "York")];
+        // The longer phrase wins where it applies; the shorter still applies elsewhere.
+        assert_eq!(
+            apply_phrase_corrections("new york and york", &corrections),
+            "NYC and York"
+        );
+    }
+
+    #[test]
+    fn phrase_correction_replacement_is_literal() {
+        // A `$1` in the replacement must be inserted verbatim, not expanded.
+        let corrections = vec![pc("foo", "$1 bar")];
+        assert_eq!(apply_phrase_corrections("foo", &corrections), "$1 bar");
+    }
+
+    #[test]
+    fn phrase_correction_empty_inputs_are_noops() {
+        assert_eq!(apply_phrase_corrections("hello", &[]), "hello");
+        assert_eq!(
+            apply_phrase_corrections("hello", &[pc("  ", "x")]),
+            "hello"
+        );
+    }
 
     #[test]
     fn test_apply_custom_words_exact_match() {

@@ -63,6 +63,45 @@ fn build_system_prompt(prompt_template: &str) -> String {
     prompt_template.replace("${output}", "").trim().to_string()
 }
 
+/// Build an instruction that makes the post-processing LLM aware of the user's
+/// custom vocabulary (the same `custom_words` list used for ASR-stage fuzzy
+/// correction). Without this the LLM is blind to those terms and may "correct"
+/// a deliberately-spelled name, acronym, or piece of jargon back to a common
+/// word. Returns `None` when there is no usable vocabulary.
+fn build_vocabulary_instruction(custom_words: &[String]) -> Option<String> {
+    let terms: Vec<&str> = custom_words
+        .iter()
+        .map(|w| w.trim())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    if terms.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "Spelling reference: when a word in the transcript matches one of these terms — \
+         or is phonetically close to it — use this exact spelling and capitalization: {}. \
+         This is reference only; never output, list, or describe these terms unless they \
+         were actually spoken.",
+        terms.join(", ")
+    ))
+}
+
+/// Prepend the custom-vocabulary instruction (if any) to a system prompt.
+///
+/// It must go at the FRONT: user prompt templates commonly end with a
+/// `Transcript:` label (where `${output}` was), so appending the vocabulary
+/// after it makes the model read the vocabulary text as the transcript and
+/// echo it back instead of cleaning the real input.
+fn with_vocabulary(system_prompt: String, vocabulary_instruction: &Option<String>) -> String {
+    match vocabulary_instruction {
+        Some(vocab) if system_prompt.is_empty() => vocab.clone(),
+        Some(vocab) => format!("{vocab}\n\n{system_prompt}"),
+        None => system_prompt,
+    }
+}
+
 /// Returns `true` when a transcription has no meaningful content to
 /// post-process (empty or whitespace-only). Used to skip the post-processing
 /// LLM call when nothing was actually transcribed, which would otherwise make
@@ -128,6 +167,16 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         return None;
     }
 
+    // Make the LLM aware of the user's custom vocabulary so it preserves the
+    // exact spelling of names/jargon/acronyms instead of "correcting" them.
+    let vocabulary_instruction = build_vocabulary_instruction(&settings.custom_words);
+    if vocabulary_instruction.is_some() {
+        debug!(
+            "Injecting {} custom-vocabulary term(s) into the post-processing prompt",
+            settings.custom_words.iter().filter(|w| !w.trim().is_empty()).count()
+        );
+    }
+
     debug!(
         "Starting LLM post-processing with provider '{}' (model: {})",
         provider.id, model
@@ -158,7 +207,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     if provider.supports_structured_output {
         debug!("Using structured outputs for provider '{}'", provider.id);
 
-        let system_prompt = build_system_prompt(&prompt);
+        let system_prompt = with_vocabulary(build_system_prompt(&prompt), &vocabulary_instruction);
         let user_content = transcription.to_string();
 
         // Handle Apple Intelligence separately since it uses native Swift APIs
@@ -272,8 +321,13 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         }
     }
 
-    // Legacy mode: Replace ${output} variable in the prompt with the actual text
-    let processed_prompt = prompt.replace("${output}", transcription);
+    // Legacy mode: Replace ${output} variable in the prompt with the actual text.
+    // Prepend the vocabulary instruction (if any) so it precedes the transcript.
+    let prompt_with_vocab = match &vocabulary_instruction {
+        Some(vocab) => format!("{vocab}\n\n{prompt}"),
+        None => prompt,
+    };
+    let processed_prompt = prompt_with_vocab.replace("${output}", transcription);
     debug!("Processed prompt length: {} chars", processed_prompt.len());
 
     match crate::llm_client::send_chat_completion(
@@ -420,7 +474,7 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string();
         change_tray_icon(app, TrayIconState::Recording);
-        show_recording_overlay(app);
+        show_recording_overlay(app, self.post_process);
 
         // Get the microphone mode to determine audio feedback timing
         let settings = get_settings(app);
@@ -516,7 +570,7 @@ impl ShortcutAction for TranscribeAction {
         let hm = Arc::clone(&app.state::<Arc<HistoryManager>>());
 
         change_tray_icon(app, TrayIconState::Transcribing);
-        show_transcribing_overlay(app);
+        show_transcribing_overlay(app, self.post_process);
 
         // Unmute before playing audio feedback so the stop sound is audible
         rm.remove_mute();
@@ -549,7 +603,7 @@ impl ShortcutAction for TranscribeAction {
                 } else {
                     // Save WAV concurrently with transcription
                     let sample_count = samples.len();
-                    let file_name = format!("handy-{}.wav", chrono::Utc::now().timestamp());
+                    let file_name = format!("typist-{}.wav", chrono::Utc::now().timestamp());
                     let wav_path = hm.recordings_dir().join(&file_name);
                     let wav_path_for_verify = wav_path.clone();
                     let samples_for_wav = samples.clone();
@@ -736,7 +790,7 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 
 #[cfg(test)]
 mod tests {
-    use super::is_blank_transcription;
+    use super::{build_vocabulary_instruction, is_blank_transcription, with_vocabulary};
 
     #[test]
     fn blank_transcription_is_detected() {
@@ -749,5 +803,38 @@ mod tests {
     fn non_blank_transcription_is_kept() {
         assert!(!is_blank_transcription("hello"));
         assert!(!is_blank_transcription("  hello  "));
+    }
+
+    #[test]
+    fn vocabulary_instruction_is_none_when_empty() {
+        assert!(build_vocabulary_instruction(&[]).is_none());
+        // Whitespace-only entries are ignored.
+        assert!(build_vocabulary_instruction(&["".into(), "   ".into()]).is_none());
+    }
+
+    #[test]
+    fn vocabulary_instruction_lists_terms() {
+        let instruction =
+            build_vocabulary_instruction(&["Kubernetes".into(), "  ".into(), "ChargeBee".into()])
+                .expect("non-empty vocabulary should produce an instruction");
+        assert!(instruction.contains("Kubernetes"));
+        assert!(instruction.contains("ChargeBee"));
+        // The blank entry is filtered out, so the terms join cleanly.
+        assert!(instruction.contains("Kubernetes, ChargeBee"));
+    }
+
+    #[test]
+    fn with_vocabulary_prepends_or_passes_through() {
+        let vocab = Some("VOCAB".to_string());
+        // Vocabulary goes at the FRONT so it isn't mistaken for transcript content
+        // (prompts often end with a "Transcript:" label).
+        assert_eq!(
+            with_vocabulary("BASE".to_string(), &vocab),
+            "VOCAB\n\nBASE"
+        );
+        // Empty base prompt yields just the vocabulary block.
+        assert_eq!(with_vocabulary(String::new(), &vocab), "VOCAB");
+        // No vocabulary leaves the prompt untouched.
+        assert_eq!(with_vocabulary("BASE".to_string(), &None), "BASE");
     }
 }

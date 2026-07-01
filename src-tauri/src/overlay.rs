@@ -86,8 +86,8 @@ fn env_flag_enabled(name: &str) -> bool {
 /// Returns true if layer shell was successfully initialized, false otherwise
 #[cfg(target_os = "linux")]
 fn init_gtk_layer_shell(overlay_window: &tauri::webview::WebviewWindow) -> bool {
-    if env_flag_enabled("HANDY_NO_GTK_LAYER_SHELL") {
-        debug!("Skipping GTK layer shell init (HANDY_NO_GTK_LAYER_SHELL is enabled)");
+    if env_flag_enabled("TYPIST_NO_GTK_LAYER_SHELL") {
+        debug!("Skipping GTK layer shell init (TYPIST_NO_GTK_LAYER_SHELL is enabled)");
         return false;
     }
 
@@ -320,7 +320,15 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     }
 }
 
-fn show_overlay_state(app_handle: &AppHandle, state: &str) {
+/// Payload for the `show-overlay` event. `post_process` lets the overlay color
+/// its indicator differently for plain transcription vs post-processed runs.
+#[derive(Clone, serde::Serialize)]
+struct OverlayPayload {
+    state: &'static str,
+    post_process: bool,
+}
+
+fn show_overlay_state(app_handle: &AppHandle, state: &'static str, post_process: bool) {
     // Check if overlay should be shown based on position setting
     let settings = settings::get_settings(app_handle);
     if settings.overlay_position == OverlayPosition::None {
@@ -336,23 +344,29 @@ fn show_overlay_state(app_handle: &AppHandle, state: &str) {
         #[cfg(target_os = "windows")]
         force_overlay_topmost(&overlay_window);
 
-        let _ = overlay_window.emit("show-overlay", state);
+        let _ = overlay_window.emit(
+            "show-overlay",
+            OverlayPayload {
+                state,
+                post_process,
+            },
+        );
     }
 }
 
 /// Shows the recording overlay window with fade-in animation
-pub fn show_recording_overlay(app_handle: &AppHandle) {
-    show_overlay_state(app_handle, "recording");
+pub fn show_recording_overlay(app_handle: &AppHandle, post_process: bool) {
+    show_overlay_state(app_handle, "recording", post_process);
 }
 
 /// Shows the transcribing overlay window
-pub fn show_transcribing_overlay(app_handle: &AppHandle) {
-    show_overlay_state(app_handle, "transcribing");
+pub fn show_transcribing_overlay(app_handle: &AppHandle, post_process: bool) {
+    show_overlay_state(app_handle, "transcribing", post_process);
 }
 
-/// Shows the processing overlay window
+/// Shows the processing overlay window (only ever shown for post-processed runs)
 pub fn show_processing_overlay(app_handle: &AppHandle) {
-    show_overlay_state(app_handle, "processing");
+    show_overlay_state(app_handle, "processing", true);
 }
 
 /// Updates the overlay window position based on current settings

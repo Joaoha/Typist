@@ -17,6 +17,7 @@ const RecordingOverlay: React.FC = () => {
   const { t } = useTranslation();
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
+  const [postProcess, setPostProcess] = useState(false);
   const [levels, setLevels] = useState<number[]>(Array(16).fill(0));
   const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
   const direction = getLanguageDirection(i18n.language);
@@ -27,8 +28,12 @@ const RecordingOverlay: React.FC = () => {
       const unlistenShow = await listen("show-overlay", async (event) => {
         // Sync language from settings each time overlay is shown
         await syncLanguageFromSettings();
-        const overlayState = event.payload as OverlayState;
-        setState(overlayState);
+        const payload = event.payload as {
+          state: OverlayState;
+          post_process: boolean;
+        };
+        setState(payload.state);
+        setPostProcess(payload.post_process);
         setIsVisible(true);
       });
 
@@ -73,7 +78,9 @@ const RecordingOverlay: React.FC = () => {
   return (
     <div
       dir={direction}
-      className={`recording-overlay ${isVisible ? "fade-in" : ""}`}
+      className={`recording-overlay ${
+        postProcess ? "mode-post" : "mode-normal"
+      } ${isVisible ? "fade-in" : ""}`}
     >
       <div className="overlay-left">{getIcon()}</div>
 

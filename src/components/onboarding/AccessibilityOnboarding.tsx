@@ -8,10 +8,49 @@ import {
   requestMicrophonePermission,
 } from "tauri-plugin-macos-permissions-api";
 import { toast } from "sonner";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { commands } from "@/bindings";
 import { useSettingsStore } from "@/stores/settingsStore";
-import HandyTextLogo from "../icons/HandyTextLogo";
+import TypistTextLogo from "../icons/TypistTextLogo";
 import { Keyboard, Mic, Check, Loader2 } from "lucide-react";
+
+/**
+ * Shown while a permission is "waiting". On macOS, accessibility grants aren't
+ * always picked up by the running process (AXIsProcessTrusted caches per
+ * process, and re-signed/rebuilt binaries can read as not-yet-trusted), so we
+ * offer an explicit recheck and a restart — the reliable way to apply the grant.
+ */
+const PermissionWaiting: React.FC<{
+  onRecheck: () => void;
+  onRestart: () => void;
+}> = ({ onRecheck, onRestart }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 text-text/50 text-sm">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        {t("onboarding.permissions.waiting")}
+      </div>
+      <p className="text-xs text-text/50">
+        {t("onboarding.permissions.waitingHint")}
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onRecheck}
+          className="px-3 py-1.5 rounded-lg border border-mid-gray/30 hover:border-logo-primary text-text/80 text-sm font-medium transition-colors"
+        >
+          {t("onboarding.permissions.recheck")}
+        </button>
+        <button
+          onClick={onRestart}
+          className="px-3 py-1.5 rounded-lg bg-logo-primary/90 hover:bg-logo-primary text-white text-sm font-medium transition-colors"
+        >
+          {t("onboarding.permissions.restart")}
+        </button>
+      </div>
+    </div>
+  );
+};
 
 interface AccessibilityOnboardingProps {
   onComplete: () => void;
@@ -247,6 +286,54 @@ const AccessibilityOnboarding: React.FC<AccessibilityOnboardingProps> = ({
     };
   }, []);
 
+  // One-shot immediate re-check (in addition to the 1s poll), so a user who has
+  // just granted access can confirm without waiting.
+  const recheckNow = useCallback(async () => {
+    try {
+      if (permissionPlatform === "windows") {
+        const micGranted = await hasWindowsMicrophoneAccess();
+        setPermissions((prev) => ({
+          ...prev,
+          microphone: micGranted ? "granted" : prev.microphone,
+        }));
+        if (micGranted) await completeOnboarding();
+        return;
+      }
+
+      const [accessibilityGranted, microphoneGranted] = await Promise.all([
+        checkAccessibilityPermission(),
+        checkMicrophonePermission(),
+      ]);
+      if (accessibilityGranted) {
+        Promise.all([
+          commands.initializeEnigo(),
+          commands.initializeShortcuts(),
+        ]).catch((e) => {
+          console.warn("Failed to initialize after permission grant:", e);
+        });
+      }
+      setPermissions((prev) => ({
+        accessibility: accessibilityGranted ? "granted" : prev.accessibility,
+        microphone: microphoneGranted ? "granted" : prev.microphone,
+      }));
+      if (accessibilityGranted && microphoneGranted) {
+        await completeOnboarding();
+      }
+    } catch (error) {
+      console.error("Manual permission recheck failed:", error);
+      toast.error(t("onboarding.permissions.errors.checkFailed"));
+    }
+  }, [permissionPlatform, hasWindowsMicrophoneAccess, completeOnboarding, t]);
+
+  const handleRestart = useCallback(async () => {
+    try {
+      await relaunch();
+    } catch (error) {
+      console.error("Failed to relaunch Typist:", error);
+      toast.error(t("onboarding.permissions.errors.restartFailed"));
+    }
+  }, [t]);
+
   const handleGrantAccessibility = async () => {
     try {
       await requestAccessibilityPermission();
@@ -308,7 +395,7 @@ const AccessibilityOnboarding: React.FC<AccessibilityOnboardingProps> = ({
   return (
     <div className="h-screen w-screen flex flex-col p-6 gap-6 items-center justify-center">
       <div className="flex flex-col items-center gap-2">
-        <HandyTextLogo width={200} />
+        <TypistTextLogo width={200} />
       </div>
 
       <div className="max-w-md w-full flex flex-col items-center gap-4">
@@ -341,10 +428,10 @@ const AccessibilityOnboarding: React.FC<AccessibilityOnboardingProps> = ({
                     {t("onboarding.permissions.granted")}
                   </div>
                 ) : permissions.microphone === "waiting" ? (
-                  <div className="flex items-center gap-2 text-text/50 text-sm">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    {t("onboarding.permissions.waiting")}
-                  </div>
+                  <PermissionWaiting
+                    onRecheck={recheckNow}
+                    onRestart={handleRestart}
+                  />
                 ) : (
                   <button
                     onClick={handleGrantMicrophone}
@@ -380,10 +467,10 @@ const AccessibilityOnboarding: React.FC<AccessibilityOnboardingProps> = ({
                     {t("onboarding.permissions.granted")}
                   </div>
                 ) : permissions.accessibility === "waiting" ? (
-                  <div className="flex items-center gap-2 text-text/50 text-sm">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    {t("onboarding.permissions.waiting")}
-                  </div>
+                  <PermissionWaiting
+                    onRecheck={recheckNow}
+                    onRestart={handleRestart}
+                  />
                 ) : (
                   <button
                     onClick={handleGrantAccessibility}

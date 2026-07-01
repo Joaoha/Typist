@@ -93,6 +93,14 @@ pub struct LLMPrompt {
     pub prompt: String,
 }
 
+/// A user-taught exact transcription fix. `from` is what the recognizer
+/// produced (captured by recording the word); `to` is the intended text.
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct PhraseCorrection {
+    pub from: String,
+    pub to: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct PostProcessProvider {
     pub id: String,
@@ -371,6 +379,11 @@ pub struct AppSettings {
     pub log_level: LogLevel,
     #[serde(default)]
     pub custom_words: Vec<String>,
+    /// Exact transcription corrections captured via the "record a correction"
+    /// flow: when the recognizer produces `from`, it is replaced with `to`.
+    /// Applied before the fuzzy `custom_words` pass.
+    #[serde(default)]
+    pub transcription_corrections: Vec<PhraseCorrection>,
     #[serde(default)]
     pub model_unload_timeout: ModelUnloadTimeout,
     #[serde(default = "default_word_correction_threshold")]
@@ -784,6 +797,7 @@ pub fn get_default_settings() -> AppSettings {
         debug_mode: false,
         log_level: default_log_level(),
         custom_words: Vec::new(),
+        transcription_corrections: Vec::new(),
         model_unload_timeout: ModelUnloadTimeout::default(),
         word_correction_threshold: default_word_correction_threshold(),
         history_limit: default_history_limit(),
