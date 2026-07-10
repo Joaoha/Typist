@@ -59,8 +59,27 @@ fn strip_invisible_chars(s: &str) -> String {
 
 /// Build a system prompt from the user's prompt template.
 /// Removes `${output}` placeholder since the transcription is sent as the user message.
+/// Also drops a dangling trailing "Transcript:" label (the default template ends with
+/// `Transcript:\n${output}`) — left in place, it makes small models echo their
+/// instructions into the output.
 fn build_system_prompt(prompt_template: &str) -> String {
-    prompt_template.replace("${output}", "").trim().to_string()
+    let stripped = prompt_template.replace("${output}", "");
+    let trimmed = stripped.trim();
+    let without_label = trimmed.strip_suffix("Transcript:").unwrap_or(trimmed);
+    without_label.trim().to_string()
+}
+
+/// True when the LLM output contains verbatim lines of its own prompt — small
+/// models sometimes emit their instructions along with (or instead of) the
+/// cleaned text. Any prompt line of 12+ chars found in the output counts;
+/// lines containing `${output}` are excluded because in legacy mode the
+/// transcript itself is substituted there.
+fn output_echoes_prompt(output: &str, prompt: &str) -> bool {
+    prompt
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.chars().count() >= 12 && !line.contains("${output}"))
+        .any(|line| output.contains(line))
 }
 
 /// Build an instruction that makes the post-processing LLM aware of the user's
@@ -233,6 +252,10 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                             None
                         } else {
                             let result = strip_invisible_chars(&result);
+                            if output_echoes_prompt(&result, &system_prompt) {
+                                warn!("Apple Intelligence output echoed the prompt — using raw transcription");
+                                return None;
+                            }
                             debug!(
                                 "Apple Intelligence post-processing succeeded. Output length: {} chars",
                                 result.len()
@@ -272,7 +295,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
             api_key.clone(),
             &model,
             user_content,
-            Some(system_prompt),
+            Some(system_prompt.clone()),
             Some(json_schema),
             reasoning_effort.clone(),
             reasoning.clone(),
@@ -281,7 +304,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         {
             Ok(Some(content)) => {
                 // Parse the JSON response to extract the transcription field
-                match serde_json::from_str::<serde_json::Value>(&content) {
+                let result = match serde_json::from_str::<serde_json::Value>(&content) {
                     Ok(json) => {
                         if let Some(transcription_value) =
                             json.get(TRANSCRIPTION_FIELD).and_then(|t| t.as_str())
@@ -292,10 +315,10 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                                 provider.id,
                                 result.len()
                             );
-                            return Some(result);
+                            result
                         } else {
                             error!("Structured output response missing 'transcription' field");
-                            return Some(strip_invisible_chars(&content));
+                            strip_invisible_chars(&content)
                         }
                     }
                     Err(e) => {
@@ -303,9 +326,17 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                             "Failed to parse structured output JSON: {}. Returning raw content.",
                             e
                         );
-                        return Some(strip_invisible_chars(&content));
+                        strip_invisible_chars(&content)
                     }
+                };
+                if output_echoes_prompt(&result, &system_prompt) {
+                    warn!(
+                        "Post-processing output echoed the prompt (provider '{}') — using raw transcription",
+                        provider.id
+                    );
+                    return None;
                 }
+                return Some(result);
             }
             Ok(None) => {
                 error!("LLM API response has no content");
@@ -342,6 +373,13 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     {
         Ok(Some(content)) => {
             let content = strip_invisible_chars(&content);
+            if output_echoes_prompt(&content, &prompt_with_vocab) {
+                warn!(
+                    "Post-processing output echoed the prompt (provider '{}', legacy mode) — using raw transcription",
+                    provider.id
+                );
+                return None;
+            }
             debug!(
                 "LLM post-processing succeeded for provider '{}'. Output length: {} chars",
                 provider.id,
@@ -790,7 +828,10 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 
 #[cfg(test)]
 mod tests {
-    use super::{build_vocabulary_instruction, is_blank_transcription, with_vocabulary};
+    use super::{
+        build_system_prompt, build_vocabulary_instruction, is_blank_transcription,
+        output_echoes_prompt, with_vocabulary,
+    };
 
     #[test]
     fn blank_transcription_is_detected() {
@@ -821,6 +862,40 @@ mod tests {
         assert!(instruction.contains("ChargeBee"));
         // The blank entry is filtered out, so the terms join cleanly.
         assert!(instruction.contains("Kubernetes, ChargeBee"));
+    }
+
+    #[test]
+    fn system_prompt_drops_dangling_transcript_label() {
+        // The default template ends with "Transcript:\n${output}" — once the
+        // placeholder is stripped, the dangling label must go too, or small
+        // models echo their instructions.
+        let template = "Clean this transcript:\n1. Fix things\n\nTranscript:\n${output}";
+        assert_eq!(
+            build_system_prompt(template),
+            "Clean this transcript:\n1. Fix things"
+        );
+        // Templates without the label are unaffected.
+        assert_eq!(build_system_prompt("Do the thing: ${output}"), "Do the thing:");
+    }
+
+    #[test]
+    fn prompt_echo_is_detected() {
+        let prompt = "Clean this transcript:\n1. Fix spelling, capitalization, and punctuation errors\n2. Convert number words to digits\n\nTranscript:\n${output}";
+        // The reported failure: cleaned text with the instruction list bled in.
+        assert!(output_echoes_prompt(
+            "Meet me at 3:30.\n1. Fix spelling, capitalization, and punctuation errors",
+            prompt
+        ));
+        // Pure instruction echo too.
+        assert!(output_echoes_prompt(
+            "2. Convert number words to digits",
+            prompt
+        ));
+        // Legitimate output passes.
+        assert!(!output_echoes_prompt("Meet me at 3:30.", prompt));
+        // Lines containing ${output} are excluded from matching, and short
+        // lines (like a lone "Transcript:") don't count.
+        assert!(!output_echoes_prompt("Transcript: hello", prompt));
     }
 
     #[test]
