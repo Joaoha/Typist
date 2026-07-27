@@ -17,6 +17,7 @@ import { useSettings } from "./hooks/useSettings";
 import { useSettingsStore } from "./stores/settingsStore";
 import { commands } from "@/bindings";
 import { getLanguageDirection, initializeRTL } from "@/lib/utils/rtl";
+import ErrorBoundary from "@/lib/errorBoundary";
 
 type OnboardingStep = "accessibility" | "model" | "done";
 
@@ -275,7 +276,9 @@ function App() {
           <div className="flex-1 overflow-y-auto">
             <div className="flex flex-col items-center p-4 gap-4">
               <AccessibilityPermissions />
-              {renderSettingsContent(currentSection)}
+              <ErrorBoundary>
+                {renderSettingsContent(currentSection)}
+              </ErrorBoundary>
             </div>
           </div>
         </div>

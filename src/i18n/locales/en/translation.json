@@ -96,7 +96,8 @@
     },
     "errors": {
       "loadModels": "Failed to load available models",
-      "downloadModel": "Failed to download model: {{error}}"
+      "downloadModel": "Failed to download model: {{error}}",
+      "selectModel": "Failed to select model. Please try again."
     },
     "permissions": {
       "title": "Permissions Required",
@@ -644,7 +645,11 @@
     "modelLoadFailed": "Failed to load model: {{model}}",
     "modelLoadFailedUnknown": "unknown model",
     "pasteFailedTitle": "Failed to Paste Text",
-    "pasteFailed": "Text could not be pasted into the active application."
+    "pasteFailed": "Text could not be pasted into the active application.",
+    "appCrashed": "Something went wrong",
+    "anErrorOccurred": "An unexpected error occurred.",
+    "reloadApp": "Reload App",
+    "selectModel": "Failed to select model. Please try again."
   },
   "appLanguage": {
     "title": "Application Language",
