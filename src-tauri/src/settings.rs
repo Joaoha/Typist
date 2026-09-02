@@ -725,11 +725,39 @@ fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
 
 pub const SETTINGS_STORE_PATH: &str = "settings_store.json";
 
+/// Adopt changed built-in shortcut defaults on existing installs.
+///
+/// Only bindings the user never customized are moved (`current == stored
+/// default`), so a deliberate choice is never overwritten; the recorded
+/// default is refreshed either way so "reset" restores the current one.
+/// Returns true when anything changed.
+fn migrate_default_bindings(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+    for (id, fresh) in get_default_settings().bindings {
+        let Some(existing) = settings.bindings.get_mut(&id) else {
+            continue;
+        };
+        if existing.default_binding == fresh.default_binding {
+            continue;
+        }
+        if existing.current_binding == existing.default_binding {
+            existing.current_binding = fresh.default_binding.clone();
+        }
+        existing.default_binding = fresh.default_binding;
+        changed = true;
+    }
+    changed
+}
+
 pub fn get_default_settings() -> AppSettings {
     #[cfg(target_os = "windows")]
     let default_shortcut = "ctrl+space";
+    // The fn/globe key: unused for typing, reachable without a chord, and only
+    // detectable by the handy-keys backend (the macOS default — see
+    // KeyboardImplementation::default). Set macOS Settings > Keyboard >
+    // "Press globe key to" to "Do Nothing" so the system doesn't also claim it.
     #[cfg(target_os = "macos")]
-    let default_shortcut = "option+space";
+    let default_shortcut = "fn";
     #[cfg(target_os = "linux")]
     let default_shortcut = "ctrl+space";
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -898,7 +926,9 @@ pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
         default_settings
     };
 
-    if ensure_post_process_defaults(&mut settings) {
+    let mut dirty = ensure_post_process_defaults(&mut settings);
+    dirty |= migrate_default_bindings(&mut settings);
+    if dirty {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 
@@ -922,7 +952,9 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
         default_settings
     };
 
-    if ensure_post_process_defaults(&mut settings) {
+    let mut dirty = ensure_post_process_defaults(&mut settings);
+    dirty |= migrate_default_bindings(&mut settings);
+    if dirty {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 
@@ -964,6 +996,59 @@ pub fn get_recording_retention_period(app: &AppHandle) -> RecordingRetentionPeri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_activation_key_defaults_to_fn() {
+        let settings = get_default_settings();
+        let transcribe = settings.bindings.get("transcribe").unwrap();
+        assert_eq!(transcribe.default_binding, "fn");
+        assert_eq!(transcribe.current_binding, "fn");
+        // handy-keys is the backend that can actually see the fn key.
+        assert_eq!(
+            KeyboardImplementation::default(),
+            KeyboardImplementation::HandyKeys
+        );
+    }
+
+    #[test]
+    fn migration_moves_untouched_bindings_only() {
+        let mut settings = get_default_settings();
+        let fresh = get_default_settings();
+        let new_default = fresh.bindings["transcribe"].default_binding.clone();
+
+        // An install created before the default changed.
+        {
+            let b = settings.bindings.get_mut("transcribe").unwrap();
+            b.default_binding = "option+space".to_string();
+            b.current_binding = "option+space".to_string();
+        }
+        assert!(migrate_default_bindings(&mut settings));
+        let b = &settings.bindings["transcribe"];
+        assert_eq!(b.current_binding, new_default);
+        assert_eq!(b.default_binding, new_default);
+
+        // Already current: nothing to do.
+        assert!(!migrate_default_bindings(&mut settings));
+    }
+
+    #[test]
+    fn migration_preserves_a_customized_binding() {
+        let mut settings = get_default_settings();
+        {
+            let b = settings.bindings.get_mut("transcribe").unwrap();
+            b.default_binding = "option+space".to_string();
+            b.current_binding = "cmd+shift+d".to_string(); // user's own choice
+        }
+        migrate_default_bindings(&mut settings);
+        let b = &settings.bindings["transcribe"];
+        // Their choice survives; only the recorded default is refreshed.
+        assert_eq!(b.current_binding, "cmd+shift+d");
+        assert_eq!(
+            b.default_binding,
+            get_default_settings().bindings["transcribe"].default_binding
+        );
+    }
 
     #[test]
     fn default_settings_disable_auto_submit() {
