@@ -1,0 +1,21 @@
+name: "Windows Build"
+
+# Builds an unsigned Typist installer for 64-bit Windows (x64).
+# Run it from the Actions tab or `gh workflow run windows-build.yml`;
+# the .exe (NSIS) and .msi installers are attached to the run as an artifact.
+# Unsigned: Windows SmartScreen warns on first launch ("More info" > "Run anyway").
+
+on: workflow_dispatch
+
+jobs:
+  windows-x64:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: "windows-latest"
+      target: "x86_64-pc-windows-msvc"
+      sign-binaries: false
+      asset-prefix: "typist-windows"
+      upload-artifacts: true
+    secrets: inherit
