@@ -1,14 +1,52 @@
 name: "Windows Build"
 
 # Builds an unsigned Typist installer for 64-bit Windows (x64).
-# Run it from the Actions tab or `gh workflow run windows-build.yml`;
-# the .exe (NSIS) and .msi installers are attached to the run as an artifact.
+# Run it from the Actions tab or `gh workflow run windows-build.yml`.
+# The .exe (NSIS) and .msi installers are attached to a DRAFT release
+# (visible only to repo collaborators) rather than uploaded as run artifacts:
+# release assets don't count toward the account-wide Actions artifact quota,
+# which other private repos' builds can fill.
 # Unsigned: Windows SmartScreen warns on first launch ("More info" > "Run anyway").
 
 on: workflow_dispatch
 
 jobs:
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release-id: ${{ steps.create-release.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from tauri.conf.json
+        id: get-version
+        shell: bash
+        run: |
+          VERSION=$(grep -o '"version": "[^"]*"' src-tauri/tauri.conf.json | cut -d'"' -f4)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        id: create-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: `windows-build-${{ github.run_number }}`,
+              target_commitish: context.sha,
+              name: `Typist ${{ steps.get-version.outputs.version }} for Windows (build ${{ github.run_number }})`,
+              body: `Unsigned x64 installer built from ${context.sha.slice(0, 7)}. SmartScreen will warn on first launch: More info > Run anyway.`,
+              draft: true,
+              prerelease: true
+            })
+            return data.id
+
   windows-x64:
+    needs: create-release
     permissions:
       contents: write
     uses: ./.github/workflows/build.yml
@@ -16,6 +54,5 @@ jobs:
       platform: "windows-latest"
       target: "x86_64-pc-windows-msvc"
       sign-binaries: false
-      asset-prefix: "typist-windows"
-      upload-artifacts: true
+      release-id: ${{ needs.create-release.outputs.release-id }}
     secrets: inherit
