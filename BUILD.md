@@ -38,6 +38,14 @@ ORT_LIB_LOCATION=$(brew --prefix onnxruntime)/lib ORT_PREFER_DYNAMIC_LINK=1 bun 
 - Visual Studio 2019/2022 with C++ development tools
 - Or Visual Studio Build Tools 2019/2022
 
+The full list is longer (LLVM for whisper-rs bindings, the Vulkan SDK, CMake, long
+paths, a short `CARGO_TARGET_DIR`). [`scripts/build-windows.ps1`](scripts/build-windows.ps1)
+installs all of it with winget and builds the installers on an x64 PC:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build-windows.ps1
+```
+
 #### Linux
 
 - Build essentials
